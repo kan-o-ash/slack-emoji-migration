@@ -12,8 +12,11 @@ const emojiDir = './data/';  // Unarchived directory containing slack emojis her
 const SLACK_ORG = '';  // Your slack org name here  (if your slack org is https://company.slack.com), type 'company'
 const TOKEN = '';  // Your unofficial slack API token here
 
+let RATELIMIT_MS = 500;
+
 
 const uploadEmoji = async (emojiName, isAlias, filePath, fileName) => {
+    await new Promise(r => setTimeout(r, RATELIMIT_MS));
     let aliasFor;
 
     const formData = new FormData();
@@ -47,19 +50,51 @@ const uploadEmoji = async (emojiName, isAlias, filePath, fileName) => {
         });
         const responseJson = await response.json();
 
+        const success = (responseJson.ok || responseJson.error === 'error_name_taken')
+
+        if (success) fs.appendFileSync('./output.txt', `${emojiName}\n`);
+
         if (isAlias)
-            console.log(`[${fileName}] Upload ALIAS :${emojiName}: -> :${aliasFor}: | Response status: ${response.status} | Response Body: `, responseJson);
+            console.log(`[${fileName}] Upload ALIAS :${emojiName}: -> :${aliasFor}: | Success: ${success} | Response status: ${response.status} | Response Body: `, responseJson);
         else
-            console.log(`[${fileName}] Upload EMOJI: :${emojiName}: | Response status: ${response.status} | Response Body: `, responseJson);
+            console.log(`[${fileName}] Upload EMOJI: :${emojiName}: | Success: ${success} | Response status: ${response.status} | Response Body: `, responseJson);
+
+        if (response.status == 429) {
+            RATELIMIT_MS = RATELIMIT_MS + 100;
+            console.log(`Got ratelimited, new limit: ${RATELIMIT_MS}`);
+            return false;
+        } else {
+            RATELIMIT_MS = Math.max(RATELIMIT_MS - 5, 0);
+            return true;
+        }
     }
     catch (e) {
         console.error('Error', e);
+        return false;
     }
+}
+
+
+const retryUploadEmoji = async (emojiName, isAlias, filePath, fileName) => {
+    let result;
+    let i = 0;
+    do {
+        result = await uploadEmoji(emojiName, isAlias, filePath, fileName);
+        i++;
+    } while (!result && i < 5)
+
+    if (!result) {
+        console.log(`${fileName} failed after 5 tries`);
+    }
+    return;
 }
 
 
 (async () => {
     const fileNames = await fs.promises.readdir(emojiDir);
+    const emojiToSkipContents = await fs.promises.readFile('./output.txt', {'encoding': 'utf8'});
+    const emojiToSkip = new Set(emojiToSkipContents.split('\n'));
+    console.log('Skipping these emojis: ', emojiToSkip);
     let aliases = [];
 
     for (const fileName of fileNames) {
@@ -79,13 +114,18 @@ const uploadEmoji = async (emojiName, isAlias, filePath, fileName) => {
 
         const emojiName = splitFileName[0];
 
+        if (emojiToSkip.has(emojiName)) {
+            console.log(`Skipping - ${emojiName}`);
+            continue;
+        }
+
         const isAlias = fileName.includes('.alias');
         if (isAlias) {
             aliases.push({emojiName, filePath, fileName});
         } else 
-            await uploadEmoji(emojiName, false, filePath, fileName);
+            await retryUploadEmoji(emojiName, false, filePath, fileName);
     }
     for (const alias of aliases) {
-        await uploadEmoji(alias.emojiName, true, alias.filePath, alias.fileName);
+        await retryUploadEmoji(alias.emojiName, true, alias.filePath, alias.fileName);
     }
 })();
